@@ -1,204 +1,501 @@
-const http = require("http");
 const WebSocket = require("ws");
+const http = require("http");
+
+
 
 const PORT = process.env.PORT || 3000;
 
-// ==============================
-// Serveur HTTP (Health Check)
-// ==============================
-const server = http.createServer((req, res) => {
-    res.writeHead(200, {
-        "Content-Type": "text/plain"
-    });
 
-    res.end("Wynote Signaling Server is Running...");
-});
 
-// ==============================
-// Serveur WebSocket
-// ==============================
+const server = http.createServer(
+    (req,res)=>{
+
+        res.writeHead(200);
+        res.end(
+            "Wynote Signaling Server OK"
+        );
+
+    }
+);
+
+
+
 const wss = new WebSocket.Server({
     server
 });
 
-// userId -> websocket
+
+
+// utilisateurs connectés
 const users = new Map();
 
-// ==============================
-// Démarrage
-// ==============================
-server.listen(PORT, () => {
-    console.log(`🚀 Wynote Signaling Server démarré sur le port ${PORT}`);
-});
 
-// ==============================
-// Heartbeat (évite les déconnexions Render)
-// ==============================
-function heartbeat() {
-    this.isAlive = true;
-}
 
-const interval = setInterval(() => {
+// appels actifs
+const calls = new Map();
 
-    wss.clients.forEach((ws) => {
 
-        if (!ws.isAlive) {
 
-            if (ws.userId) {
-                users.delete(ws.userId);
-                console.log(`❌ Connexion expirée : ${ws.userId}`);
-            }
 
-            return ws.terminate();
-        }
 
-        ws.isAlive = false;
-        ws.ping();
+function sendToUser(
+    userId,
+    data
+){
 
-    });
-
-}, 30000);
-
-// ==============================
-// Connexion WebSocket
-// ==============================
-wss.on("connection", (ws) => {
-
-    console.log("📱 Nouvelle connexion WebSocket");
-
-    ws.isAlive = true;
-
-    ws.on("pong", heartbeat);
-
-    ws.on("message", (message) => {
-
-        try {
-
-            const data = JSON.parse(message.toString());
-
-            console.log(`📩 ${data.type}`);
-
-            switch (data.type) {
-
-                // ==========================
-                // Enregistrement utilisateur
-                // ==========================
-                case "store_user": {
-
-                    const userId = String(data.user_id);
-
-                    ws.userId = userId;
-
-                    users.set(userId, ws);
-
-                    console.log(`✅ Utilisateur enregistré : ${userId}`);
-
-                    ws.send(JSON.stringify({
-                        type: "registered",
-                        user_id: userId
-                    }));
-
-                    break;
-                }
-
-                // ==========================
-                // Signaling WebRTC
-                // ==========================
-                case "offer":
-                case "answer":
-                case "candidate":
-                case "end_call": {
-
-                    if (!ws.userId) {
-
-                        ws.send(JSON.stringify({
-                            type: "error",
-                            message: "Utilisateur non enregistré"
-                        }));
-
-                        break;
-                    }
-
-                    const receiverId = String(data.to);
-
-                    const target = users.get(receiverId);
-
-                    if (target && target.readyState === WebSocket.OPEN) {
-
-                        data.from = ws.userId;
-
-                        target.send(JSON.stringify(data));
-
-                        console.log(
-                            `📨 ${data.type} : ${ws.userId} ➜ ${receiverId}`
-                        );
-
-                    } else {
-
-                        console.log(
-                            `⚠️ Destinataire ${receiverId} hors ligne`
-                        );
-
-                        if (data.type === "offer") {
-
-                            ws.send(JSON.stringify({
-                                type: "end_call",
-                                from: receiverId,
-                                reason: "user_offline"
-                            }));
-
-                        }
-
-                    }
-
-                    break;
-                }
-
-                default:
-
-                    console.log(
-                        `⚠️ Type inconnu : ${data.type}`
-                    );
-            }
-
-        } catch (error) {
-
-            console.error(
-                "❌ Erreur JSON :",
-                error.message
-            );
-
-        }
-
-    });
-
-    ws.on("close", () => {
-
-        if (ws.userId) {
-
-            users.delete(ws.userId);
-
-            console.log(
-                `❌ Utilisateur déconnecté : ${ws.userId}`
-            );
-
-        }
-
-    });
-
-    ws.on("error", (error) => {
-
-        console.log(
-            `❌ Erreur WebSocket : ${error.message}`
+    const client =
+        users.get(
+            String(userId)
         );
 
+
+    if(
+        client &&
+        client.readyState === WebSocket.OPEN
+    ){
+
+        client.send(
+            JSON.stringify(data)
+        );
+
+
+        return true;
+
+    }
+
+
+    return false;
+
+}
+
+
+
+
+
+
+
+wss.on(
+"connection",
+(ws)=>{
+
+
+    let currentUser=null;
+
+
+
+    console.log(
+        "Nouvelle connexion"
+    );
+
+
+
+    ws.on(
+    "message",
+    message=>{
+
+
+        try{
+
+
+            const data =
+                JSON.parse(message);
+
+
+
+            const type =
+                data.type;
+
+
+
+            console.log(
+                "Message:",
+                data
+            );
+
+
+
+
+            /*
+             * Enregistrement utilisateur
+             */
+
+            if(type==="register"){
+
+
+                currentUser =
+                    String(
+                        data.userId
+                    );
+
+
+                users.set(
+                    currentUser,
+                    ws
+                );
+
+
+                console.log(
+                    "Utilisateur connecté:",
+                    currentUser
+                );
+
+
+                return;
+
+            }
+
+
+
+
+
+
+            /*
+             * Appel entrant
+             */
+
+            if(type==="incoming_call"){
+
+
+
+                const receiver =
+                    data.receiverId;
+
+
+
+                calls.set(
+                    receiver,
+                    data.callerId
+                );
+
+
+
+                sendToUser(
+                    receiver,
+                    {
+
+                        type:
+                        "incoming_call",
+
+
+                        callerId:
+                        data.callerId
+
+                    }
+
+                );
+
+
+                return;
+
+            }
+
+
+
+
+
+
+            /*
+             * Acceptation
+             */
+
+            if(type==="call_accept"){
+
+
+
+                sendToUser(
+                    data.targetId,
+                    {
+
+                        type:
+                        "call_accept",
+
+
+                        userId:
+                        currentUser
+
+                    }
+
+                );
+
+
+                return;
+
+            }
+
+
+
+
+
+
+            /*
+             * Refus
+             */
+
+            if(type==="call_reject"){
+
+
+
+                sendToUser(
+                    data.targetId,
+                    {
+
+                        type:
+                        "call_reject"
+
+                    }
+
+                );
+
+
+                calls.delete(
+                    currentUser
+                );
+
+
+                return;
+
+            }
+
+
+
+
+
+
+
+
+            /*
+             * SDP OFFER
+             */
+
+            if(type==="offer"){
+
+
+
+                sendToUser(
+                    data.targetId,
+                    {
+
+                        type:
+                        "offer",
+
+
+                        senderId:
+                        currentUser,
+
+
+                        sdp:
+                        data.sdp
+
+                    }
+
+                );
+
+
+                return;
+
+            }
+
+
+
+
+
+
+
+            /*
+             * SDP ANSWER
+             */
+
+            if(type==="answer"){
+
+
+
+                sendToUser(
+                    data.targetId,
+                    {
+
+                        type:
+                        "answer",
+
+
+                        senderId:
+                        currentUser,
+
+
+                        sdp:
+                        data.sdp
+
+                    }
+
+                );
+
+
+                return;
+
+            }
+
+
+
+
+
+
+
+
+            /*
+             * ICE Candidate
+             */
+
+            if(type==="candidate"){
+
+
+
+                sendToUser(
+                    data.targetId,
+                    {
+
+                        type:
+                        "candidate",
+
+
+                        candidate:
+                        data.candidate,
+
+
+                        sdpMid:
+                        data.sdpMid,
+
+
+                        sdpMLineIndex:
+                        data.sdpMLineIndex
+
+                    }
+
+                );
+
+
+                return;
+
+            }
+
+
+
+
+
+
+
+            /*
+             * Fin appel
+             */
+
+            if(type==="call_end"){
+
+
+
+                sendToUser(
+                    data.targetId,
+                    {
+
+                        type:
+                        "call_end"
+
+                    }
+
+                );
+
+
+                calls.delete(
+                    currentUser
+                );
+
+
+                return;
+
+            }
+
+
+
+
+
+
+
+            /*
+             * Ping
+             */
+
+            if(type==="ping"){
+
+                ws.send(
+                    JSON.stringify({
+                        type:"pong"
+                    })
+                );
+
+            }
+
+
+
+        }
+        catch(error){
+
+
+            console.log(
+                "Erreur message",
+                error
+            );
+
+        }
+
+
     });
+
+
+
+
+
+
+
+
+
+    ws.on(
+    "close",
+    ()=>{
+
+
+        if(currentUser){
+
+
+            users.delete(
+                currentUser
+            );
+
+
+            console.log(
+                "Déconnexion:",
+                currentUser
+            );
+
+        }
+
+
+    });
+
+
 
 });
 
-// ==============================
-// Arrêt propre
-// ==============================
-wss.on("close", () => {
-    clearInterval(interval);
+
+
+
+
+
+
+server.listen(
+PORT,
+()=>{
+
+
+console.log(
+`Wynote Signaling running ${PORT}`
+);
+
+
 });
