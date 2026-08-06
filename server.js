@@ -1,501 +1,293 @@
 const WebSocket = require("ws");
 const http = require("http");
 
-
-
 const PORT = process.env.PORT || 3000;
 
-
-
-const server = http.createServer(
-    (req,res)=>{
-
-        res.writeHead(200);
-        res.end(
-            "Wynote Signaling Server OK"
-        );
-
-    }
-);
-
-
-
-const wss = new WebSocket.Server({
-    server
+const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end("Wynote Signaling Server OK");
 });
 
-
+const wss = new WebSocket.Server({ server });
 
 // utilisateurs connectés
 const users = new Map();
 
-
-
 // appels actifs
 const calls = new Map();
 
+function sendToUser(userId, data) {
 
+    const client = users.get(String(userId));
 
+    if (client && client.readyState === WebSocket.OPEN) {
 
-
-function sendToUser(
-    userId,
-    data
-){
-
-    const client =
-        users.get(
-            String(userId)
-        );
-
-
-    if(
-        client &&
-        client.readyState === WebSocket.OPEN
-    ){
-
-        client.send(
-            JSON.stringify(data)
-        );
-
+        client.send(JSON.stringify(data));
 
         return true;
-
     }
 
-
     return false;
-
 }
 
+wss.on("connection", (ws) => {
 
+    let currentUser = null;
 
+    console.log("Nouvelle connexion");
 
+    ws.on("message", (message) => {
 
+        try {
 
+            const data = JSON.parse(message);
 
-wss.on(
-"connection",
-(ws)=>{
+            const type = data.type;
 
+            console.log("Message :", data);
 
-    let currentUser=null;
+            // =====================================================
+            // REGISTER
+            // =====================================================
 
+            if (type === "register") {
 
+                currentUser = String(data.userId);
 
-    console.log(
-        "Nouvelle connexion"
-    );
+                users.set(currentUser, ws);
 
+                console.log(`Utilisateur ${currentUser} connecté`);
 
+                return;
+            }
 
-    ws.on(
-    "message",
-    message=>{
+            // =====================================================
+            // APPEL ENTRANT
+            // =====================================================
 
+            if (type === "incoming_call") {
 
-        try{
+                const caller = String(data.callerId);
+                const receiver = String(data.receiverId);
 
+                calls.set(caller, receiver);
+                calls.set(receiver, caller);
 
-            const data =
-                JSON.parse(message);
+                const delivered = sendToUser(receiver, {
 
+                    type: "incoming_call",
 
+                    callerId: caller,
 
-            const type =
-                data.type;
+                    callerName: data.callerName,
 
+                    callerAvatar: data.callerAvatar
 
-
-            console.log(
-                "Message:",
-                data
-            );
-
-
-
-
-            /*
-             * Enregistrement utilisateur
-             */
-
-            if(type==="register"){
-
-
-                currentUser =
-                    String(
-                        data.userId
-                    );
-
-
-                users.set(
-                    currentUser,
-                    ws
-                );
-
+                });
 
                 console.log(
-                    "Utilisateur connecté:",
-                    currentUser
+                    `[CALL] ${caller} -> ${receiver} : ${delivered ? "DELIVERED" : "OFFLINE"}`
                 );
 
+                if (!delivered) {
+
+                    sendToUser(caller, {
+
+                        type: "call_reject",
+
+                        reason: "offline"
+
+                    });
+
+                }
 
                 return;
-
             }
 
+            // =====================================================
+            // ACCEPTATION
+            // =====================================================
 
+            if (type === "call_accept") {
 
+                sendToUser(String(data.targetId), {
 
+                    type: "call_accept",
 
+                    userId: currentUser
 
-            /*
-             * Appel entrant
-             */
-
-            if(type==="incoming_call"){
-
-
-
-                const receiver =
-                    data.receiverId;
-
-
-
-                calls.set(
-                    receiver,
-                    data.callerId
-                );
-
-
-
-                sendToUser(
-                    receiver,
-                    {
-
-                        type:
-                        "incoming_call",
-
-
-                        callerId:
-                        data.callerId
-
-                    }
-
-                );
-
+                });
 
                 return;
-
             }
 
+            // =====================================================
+            // REFUS
+            // =====================================================
 
+            if (type === "call_reject") {
 
+                sendToUser(String(data.targetId), {
 
+                    type: "call_reject"
 
+                });
 
-            /*
-             * Acceptation
-             */
+                const other = calls.get(currentUser);
 
-            if(type==="call_accept"){
+                calls.delete(currentUser);
 
+                if (other) {
 
+                    calls.delete(other);
 
-                sendToUser(
-                    data.targetId,
-                    {
-
-                        type:
-                        "call_accept",
-
-
-                        userId:
-                        currentUser
-
-                    }
-
-                );
-
+                }
 
                 return;
-
             }
 
+            // =====================================================
+            // OFFER
+            // =====================================================
 
+            if (type === "offer") {
 
+                sendToUser(String(data.targetId), {
 
+                    type: "offer",
 
+                    senderId: currentUser,
 
-            /*
-             * Refus
-             */
+                    sdp: data.sdp
 
-            if(type==="call_reject"){
-
-
-
-                sendToUser(
-                    data.targetId,
-                    {
-
-                        type:
-                        "call_reject"
-
-                    }
-
-                );
-
-
-                calls.delete(
-                    currentUser
-                );
-
+                });
 
                 return;
-
             }
 
+            // =====================================================
+            // ANSWER
+            // =====================================================
 
+            if (type === "answer") {
 
+                sendToUser(String(data.targetId), {
 
+                    type: "answer",
 
+                    senderId: currentUser,
 
+                    sdp: data.sdp
 
-
-            /*
-             * SDP OFFER
-             */
-
-            if(type==="offer"){
-
-
-
-                sendToUser(
-                    data.targetId,
-                    {
-
-                        type:
-                        "offer",
-
-
-                        senderId:
-                        currentUser,
-
-
-                        sdp:
-                        data.sdp
-
-                    }
-
-                );
-
+                });
 
                 return;
-
             }
 
+            // =====================================================
+            // ICE
+            // =====================================================
 
+            if (type === "candidate") {
 
+                sendToUser(String(data.targetId), {
 
+                    type: "candidate",
 
+                    senderId: currentUser,
 
+                    candidate: data.candidate,
 
-            /*
-             * SDP ANSWER
-             */
+                    sdpMid: data.sdpMid,
 
-            if(type==="answer"){
+                    sdpMLineIndex: data.sdpMLineIndex
 
-
-
-                sendToUser(
-                    data.targetId,
-                    {
-
-                        type:
-                        "answer",
-
-
-                        senderId:
-                        currentUser,
-
-
-                        sdp:
-                        data.sdp
-
-                    }
-
-                );
-
+                });
 
                 return;
-
             }
 
+            // =====================================================
+            // FIN APPEL
+            // =====================================================
 
+            if (type === "call_end") {
 
+                sendToUser(String(data.targetId), {
 
+                    type: "call_end"
 
+                });
 
+                const other = calls.get(currentUser);
 
+                calls.delete(currentUser);
 
-            /*
-             * ICE Candidate
-             */
+                if (other) {
 
-            if(type==="candidate"){
+                    calls.delete(other);
 
-
-
-                sendToUser(
-                    data.targetId,
-                    {
-
-                        type:
-                        "candidate",
-
-
-                        candidate:
-                        data.candidate,
-
-
-                        sdpMid:
-                        data.sdpMid,
-
-
-                        sdpMLineIndex:
-                        data.sdpMLineIndex
-
-                    }
-
-                );
-
+                }
 
                 return;
-
             }
 
+            // =====================================================
+            // PING
+            // =====================================================
 
+            if (type === "ping") {
 
+                ws.send(JSON.stringify({
 
+                    type: "pong"
 
-
-
-            /*
-             * Fin appel
-             */
-
-            if(type==="call_end"){
-
-
-
-                sendToUser(
-                    data.targetId,
-                    {
-
-                        type:
-                        "call_end"
-
-                    }
-
-                );
-
-
-                calls.delete(
-                    currentUser
-                );
-
+                }));
 
                 return;
-
             }
 
+        } catch (error) {
 
-
-
-
-
-
-            /*
-             * Ping
-             */
-
-            if(type==="ping"){
-
-                ws.send(
-                    JSON.stringify({
-                        type:"pong"
-                    })
-                );
-
-            }
-
-
+            console.error("Erreur message :", error);
 
         }
-        catch(error){
-
-
-            console.log(
-                "Erreur message",
-                error
-            );
-
-        }
-
 
     });
 
+    // =====================================================
+    // DECONNEXION
+    // =====================================================
 
+    ws.on("close", () => {
 
+        if (!currentUser)
+            return;
 
+        const other = calls.get(currentUser);
 
+        if (other) {
 
+            sendToUser(other, {
 
+                type: "call_end"
 
+            });
 
-    ws.on(
-    "close",
-    ()=>{
-
-
-        if(currentUser){
-
-
-            users.delete(
-                currentUser
-            );
-
-
-            console.log(
-                "Déconnexion:",
-                currentUser
-            );
-
+            calls.delete(other);
+            calls.delete(currentUser);
         }
 
+        users.delete(currentUser);
+
+        console.log(`Déconnexion : ${currentUser}`);
 
     });
-
-
 
 });
 
+server.listen(PORT, () => {
 
-
-
-
-
-
-server.listen(
-PORT,
-()=>{
-
-
-console.log(
-`Wynote Signaling running ${PORT}`
-);
-
+    console.log(`Wynote Signaling Server running on port ${PORT}`);
 
 });
