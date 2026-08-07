@@ -5,289 +5,124 @@ const PORT = process.env.PORT || 3000;
 
 const server = http.createServer((req, res) => {
     res.writeHead(200);
-    res.end("Wynote Signaling Server OK");
+    res.end("Wynote Signaling Server Ultra Pro OK");
 });
 
 const wss = new WebSocket.Server({ server });
 
-// utilisateurs connectés
+// Map des utilisateurs connectés <userId, socket>
 const users = new Map();
 
-// appels actifs
-const calls = new Map();
+// Map des appels actifs <userId, targetId> pour le nettoyage automatique
+const activeCalls = new Map();
 
 function sendToUser(userId, data) {
-
     const client = users.get(String(userId));
-
     if (client && client.readyState === WebSocket.OPEN) {
-
         client.send(JSON.stringify(data));
-
         return true;
     }
-
     return false;
 }
 
 wss.on("connection", (ws) => {
-
     let currentUser = null;
 
-    console.log("Nouvelle connexion");
-
     ws.on("message", (message) => {
-
         try {
-
             const data = JSON.parse(message);
-
             const type = data.type;
 
-            console.log("Message :", data);
+            console.log(`[Signal] ${type} de ${currentUser || "Inconnu"}`);
 
-            // =====================================================
-            // REGISTER
-            // =====================================================
+            switch (type) {
+                case "register":
+                    currentUser = String(data.userId);
+                    users.set(currentUser, ws);
+                    console.log(`Utilisateur ${currentUser} connecté`);
+                    break;
 
-            if (type === "register") {
+                case "incoming_call":
+                    const caller = String(data.callerId);
+                    const receiver = String(data.receiverId);
+                    
+                    activeCalls.set(caller, receiver);
+                    activeCalls.set(receiver, caller);
 
-                currentUser = String(data.userId);
-
-                users.set(currentUser, ws);
-
-                console.log(`Utilisateur ${currentUser} connecté`);
-
-                return;
-            }
-
-            // =====================================================
-            // APPEL ENTRANT
-            // =====================================================
-
-            if (type === "incoming_call") {
-
-                const caller = String(data.callerId);
-                const receiver = String(data.receiverId);
-
-                calls.set(caller, receiver);
-                calls.set(receiver, caller);
-
-                const delivered = sendToUser(receiver, {
-
-                    type: "incoming_call",
-
-                    callerId: caller,
-
-                    callerName: data.callerName,
-
-                    callerAvatar: data.callerAvatar
-
-                });
-
-                console.log(
-                    `[CALL] ${caller} -> ${receiver} : ${delivered ? "DELIVERED" : "OFFLINE"}`
-                );
-
-                if (!delivered) {
-
-                    sendToUser(caller, {
-
-                        type: "call_reject",
-
-                        reason: "offline"
-
+                    // IMPORTANT: On passe le callType (audio/video) pour l'UI Android
+                    sendToUser(receiver, {
+                        type: "incoming_call",
+                        callerId: caller,
+                        callerName: data.callerName,
+                        callerAvatar: data.callerAvatar,
+                        callType: data.callType || "audio" 
                     });
+                    break;
 
-                }
+                case "call_accept":
+                    sendToUser(String(data.targetId), {
+                        type: "call_accept",
+                        userId: currentUser
+                    });
+                    break;
 
-                return;
+                case "call_reject":
+                    const targetToReject = String(data.targetId);
+                    sendToUser(targetToReject, { type: "call_reject" });
+                    activeCalls.delete(currentUser);
+                    activeCalls.delete(targetToReject);
+                    break;
+
+                case "offer":
+                case "answer":
+                    sendToUser(String(data.targetId), {
+                        type: type,
+                        senderId: currentUser,
+                        sdp: data.sdp
+                    });
+                    break;
+
+                case "candidate":
+                    sendToUser(String(data.targetId), {
+                        type: "candidate",
+                        senderId: currentUser,
+                        candidate: data.candidate,
+                        sdpMid: data.sdpMid,
+                        sdpMLineIndex: data.sdpMLineIndex
+                    });
+                    break;
+
+                case "call_end":
+                    const partnerId = String(data.targetId);
+                    sendToUser(partnerId, { type: "call_end" });
+                    activeCalls.delete(currentUser);
+                    activeCalls.delete(partnerId);
+                    break;
+
+                case "ping":
+                    ws.send(JSON.stringify({ type: "pong" }));
+                    break;
             }
-
-            // =====================================================
-            // ACCEPTATION
-            // =====================================================
-
-            if (type === "call_accept") {
-
-                sendToUser(String(data.targetId), {
-
-                    type: "call_accept",
-
-                    userId: currentUser
-
-                });
-
-                return;
-            }
-
-            // =====================================================
-            // REFUS
-            // =====================================================
-
-            if (type === "call_reject") {
-
-                sendToUser(String(data.targetId), {
-
-                    type: "call_reject"
-
-                });
-
-                const other = calls.get(currentUser);
-
-                calls.delete(currentUser);
-
-                if (other) {
-
-                    calls.delete(other);
-
-                }
-
-                return;
-            }
-
-            // =====================================================
-            // OFFER
-            // =====================================================
-
-            if (type === "offer") {
-
-                sendToUser(String(data.targetId), {
-
-                    type: "offer",
-
-                    senderId: currentUser,
-
-                    sdp: data.sdp
-
-                });
-
-                return;
-            }
-
-            // =====================================================
-            // ANSWER
-            // =====================================================
-
-            if (type === "answer") {
-
-                sendToUser(String(data.targetId), {
-
-                    type: "answer",
-
-                    senderId: currentUser,
-
-                    sdp: data.sdp
-
-                });
-
-                return;
-            }
-
-            // =====================================================
-            // ICE
-            // =====================================================
-
-            if (type === "candidate") {
-
-                sendToUser(String(data.targetId), {
-
-                    type: "candidate",
-
-                    senderId: currentUser,
-
-                    candidate: data.candidate,
-
-                    sdpMid: data.sdpMid,
-
-                    sdpMLineIndex: data.sdpMLineIndex
-
-                });
-
-                return;
-            }
-
-            // =====================================================
-            // FIN APPEL
-            // =====================================================
-
-            if (type === "call_end") {
-
-                sendToUser(String(data.targetId), {
-
-                    type: "call_end"
-
-                });
-
-                const other = calls.get(currentUser);
-
-                calls.delete(currentUser);
-
-                if (other) {
-
-                    calls.delete(other);
-
-                }
-
-                return;
-            }
-
-            // =====================================================
-            // PING
-            // =====================================================
-
-            if (type === "ping") {
-
-                ws.send(JSON.stringify({
-
-                    type: "pong"
-
-                }));
-
-                return;
-            }
-
         } catch (error) {
-
-            console.error("Erreur message :", error);
-
+            console.error("Erreur Signaling:", error);
         }
-
     });
-
-    // =====================================================
-    // DECONNEXION
-    // =====================================================
 
     ws.on("close", () => {
-
-        if (!currentUser)
-            return;
-
-        const other = calls.get(currentUser);
-
-        if (other) {
-
-            sendToUser(other, {
-
-                type: "call_end"
-
-            });
-
-            calls.delete(other);
-            calls.delete(currentUser);
+        if (currentUser) {
+            console.log(`Déconnexion : ${currentUser}`);
+            const partnerId = activeCalls.get(currentUser);
+            if (partnerId) {
+                // Notifie l'autre côté que l'appel est coupé à cause d'une perte réseau
+                sendToUser(partnerId, { type: "call_end", reason: "peer_disconnected" });
+                activeCalls.delete(partnerId);
+                activeCalls.delete(currentUser);
+            }
+            users.delete(currentUser);
         }
-
-        users.delete(currentUser);
-
-        console.log(`Déconnexion : ${currentUser}`);
-
     });
-
 });
 
 server.listen(PORT, () => {
-
-    console.log(`Wynote Signaling Server running on port ${PORT}`);
-
+    console.log(`Wynote Signaling Server Ultra Pro running on port ${PORT}`);
 });
